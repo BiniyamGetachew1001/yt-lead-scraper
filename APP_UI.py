@@ -23,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from LEAD_FINDER import LeadFinderConfig, run_lead_finder_thread
-from SHEETS_EXPORT import export_to_google_sheets
+from SHEETS_EXPORT import export_to_excel
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,19 +62,16 @@ _pw_status = _bootstrap_playwright()
 def _resolve_credentials(local_path: str) -> str:
     """
     Return a valid path to credentials.json.
+    Kept for future Google Sheets re-integration — not used by the Excel export.
 
-    Local:  returns local_path as-is (file must exist on disk).
-    Cloud:  reconstructs credentials.json from st.secrets['gcp_service_account']
-            and writes it to a temp file, returning that temp path.
+    Local:  returns local_path as-is.
+    Cloud:  reconstructs credentials.json from st.secrets['gcp_service_account'].
     """
     try:
         if "gcp_service_account" in st.secrets:
             creds = dict(st.secrets["gcp_service_account"])
             tmp = tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".json",
-                prefix="yt_creds_",
-                delete=False,
+                mode="w", suffix=".json", prefix="yt_creds_", delete=False,
             )
             json.dump(creds, tmp)
             tmp.close()
@@ -279,20 +276,16 @@ with st.sidebar:
         key="max_days",
     )
 
-    st.markdown('<div class="section-label">Google Sheets Export</div>', unsafe_allow_html=True)
-    sheet_name = st.text_input(
-        "Sheet Name",
-        value="YT Leads — Video Editing Outreach",
-        key="sheet_name",
-    )
-    creds_path = st.text_input(
-        "credentials.json path",
-        value="credentials.json",
-        key="creds_path",
+    st.markdown('<div class="section-label">Excel Export</div>', unsafe_allow_html=True)
+    excel_path = st.text_input(
+        "Output filename",
+        value="leads_export.xlsx",
+        key="excel_path",
+        help="Saved in the project folder. Opens in Excel, Google Sheets, or LibreOffice.",
     )
 
     st.markdown("---")
-    st.caption("💾 Leads auto-save to `leads_export.csv` after every match.")
+    st.caption("💾 Leads also auto-save to `leads_export.csv` after every match.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,7 +384,7 @@ with btn_c4:
     export_disabled = len(st.session_state.results) == 0
     st.markdown('<div class="btn-export">', unsafe_allow_html=True)
     export_clicked = st.button(
-        "📊  Export to Sheets",
+        "📊  Export to Excel",
         disabled=export_disabled,
         use_container_width=True,
         key="btn_export",
@@ -469,25 +462,30 @@ if stop_clicked:
     st.rerun()
 
 if export_clicked:
-    resolved_creds = _resolve_credentials(creds_path)
-    if not Path(resolved_creds).exists():
-        st.error(
-            f"❌ Credentials not found at `{creds_path}`. "
-            "Either place `credentials.json` in the project folder, "
-            "or add `[gcp_service_account]` to your Streamlit secrets. "
-            "See UPGRADE_README.md for the full tutorial."
-        )
-    else:
-        with st.spinner("Exporting to Google Sheets…"):
-            try:
-                url = export_to_google_sheets(
-                    leads=st.session_state.results,
-                    sheet_name=sheet_name,
-                    credentials_path=resolved_creds,
-                )
-                st.success(f"✅ Exported {len(st.session_state.results)} leads. [Open Sheet]({url})")
-            except Exception as exc:
-                st.error(f"Export failed: {type(exc).__name__}: {exc}")
+    with st.spinner("Building Excel workbook…"):
+        try:
+            saved_path = export_to_excel(
+                leads=st.session_state.results,
+                output_path=excel_path,
+            )
+            # Read the file back so we can offer an in-browser download button
+            with open(saved_path, "rb") as fh:
+                xlsx_bytes = fh.read()
+
+            st.success(f"✅ Excel file ready — {len(st.session_state.results)} leads exported.")
+            st.download_button(
+                label="⬇️  Download leads_export.xlsx",
+                data=xlsx_bytes,
+                file_name=Path(excel_path).name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_xlsx",
+            )
+            st.caption(
+                "💡 To view in Google Sheets: open sheets.google.com → New → "
+                "Upload → select this file. No Google Cloud account needed."
+            )
+        except Exception as exc:
+            st.error(f"Export failed: {type(exc).__name__}: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

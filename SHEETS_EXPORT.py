@@ -1,51 +1,53 @@
 #!/usr/bin/env python3
 """
-SHEETS_EXPORT.py — Google Sheets CRM Export
-Converts the scraped lead list into a formatted outreach-ready Google Sheet.
+SHEETS_EXPORT.py — Excel CRM Export
+Converts the scraped lead list into a formatted, outreach-ready Excel workbook.
 
-Authentication uses a service account credentials.json file.
-See UPGRADE_README.md for the full setup tutorial.
+Zero cloud accounts required. No API keys. Completely free.
+Output: leads_export.xlsx  (opens in Excel, Google Sheets, LibreOffice)
 """
 
-import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
-import gspread
-from google.oauth2.service_account import Credentials
+import openpyxl
+from openpyxl.styles import (
+    Alignment,
+    Border,
+    Font,
+    GradientFill,
+    PatternFill,
+    Side,
+)
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# OAuth 2.0 scopes required for reading and writing Sheets + Drive
-_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-# Column headers — MUST stay in sync with the field mapping below
 SHEET_HEADERS: List[str] = [
     "Channel Name",
     "Channel URL",
     "Subscribers",
     "Total Views",
-    "Latest Upload Age (Days)",
+    "Upload Age (Days)",
     "Email",
     "Instagram",
     "TikTok",
     "Twitter / X",
     "LinkedIn",
-    "Other Social Links",
+    "Other Links",
     "Channel Description",
-    "Channel Niche (Keyword)",
+    "Keyword Found By",
     "Outreach Status",
     "Notes",
     "Date Added",
 ]
 
-# Maps LeadResult dict keys → 1-based column index in the sheet
-# Columns 15 (Notes) and 16 (Date Added) are handled separately below
+# Maps lead dict key → 1-based column index (must match SHEET_HEADERS order)
 _FIELD_TO_COL: Dict[str, int] = {
     "channel_name":       1,
     "channel_url":        2,
@@ -61,176 +63,230 @@ _FIELD_TO_COL: Dict[str, int] = {
     "description":        12,
     "keyword_found_by":   13,
     "outreach_status":    14,
-    # col 15 = "Notes" → blank by default
+    # col 15 = Notes  → blank for user to fill
     "scraped_at":         16,
 }
 
-# Colour used for the header row background (hex without #)
-_HEADER_BG_COLOUR = {"red": 0.11, "green": 0.13, "blue": 0.19}  # dark navy
-_HEADER_FG_COLOUR = {"red": 1.0,  "green": 1.0,  "blue": 1.0}   # white text
+# Approximate column widths in Excel units
+_COL_WIDTHS: Dict[int, int] = {
+    1: 28,   # Channel Name
+    2: 42,   # Channel URL
+    3: 14,   # Subscribers
+    4: 14,   # Total Views
+    5: 18,   # Upload Age
+    6: 30,   # Email
+    7: 30,   # Instagram
+    8: 30,   # TikTok
+    9: 30,   # Twitter
+    10: 30,  # LinkedIn
+    11: 40,  # Other Links
+    12: 50,  # Description
+    13: 22,  # Keyword
+    14: 18,  # Outreach Status
+    15: 30,  # Notes
+    16: 20,  # Date Added
+}
+
+# Outreach status dropdown options
+_STATUS_OPTIONS = [
+    "Not Contacted",
+    "Email Sent",
+    "Followed Up",
+    "Replied",
+    "Call Booked",
+    "Converted",
+    "Not Interested",
+    "Bounced",
+]
+
+# Colour palette
+_HEADER_BG   = "1A1D2B"   # dark navy (hex, no #)
+_HEADER_FG   = "FFFFFF"   # white text
+_ALT_ROW_BG  = "F3F4F8"   # very light grey for alternating rows
+_ACCENT_BLUE = "4299E1"   # URL column tint
+_GREEN_BG    = "E6F9F0"   # rows with email found
+_LINK_BLUE   = "2B6CB0"   # hyperlink colour
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AUTHENTICATION
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def _get_client(credentials_path: str) -> gspread.Client:
-    """
-    Authenticate with the Google Sheets API using a service account key file.
+def _header_font()   -> Font:
+    return Font(name="Calibri", bold=True, color=_HEADER_FG, size=10)
 
-    credentials_path — path to the downloaded service account JSON key file
-                       (e.g., 'credentials.json' in the project root).
-    """
-    creds = Credentials.from_service_account_file(credentials_path, scopes=_SCOPES)
-    return gspread.authorize(creds)
+def _header_fill()   -> PatternFill:
+    return PatternFill(fill_type="solid", fgColor=_HEADER_BG)
 
+def _header_align()  -> Alignment:
+    return Alignment(horizontal="center", vertical="center", wrap_text=False)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHEET FORMATTING
-# ─────────────────────────────────────────────────────────────────────────────
-def _format_header_row(worksheet: gspread.Worksheet) -> None:
-    """
-    Apply formatting to the header row (row 1):
-        • Bold, white text on a dark navy background
-        • Freeze the header row so it stays visible when scrolling
-        • Auto-resize columns A–P to fit content
-    """
-    sheet_id = worksheet.spreadsheet.id
-    ws_id    = worksheet.id
-    n_cols   = len(SHEET_HEADERS)
+def _alt_fill()      -> PatternFill:
+    return PatternFill(fill_type="solid", fgColor=_ALT_ROW_BG)
 
-    # Build the batchUpdate request body
-    requests = [
-        # ── Header background + font ─────────────────────────────────────────
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId":          ws_id,
-                    "startRowIndex":    0,
-                    "endRowIndex":      1,
-                    "startColumnIndex": 0,
-                    "endColumnIndex":   n_cols,
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": _HEADER_BG_COLOUR,
-                        "textFormat": {
-                            "bold":            True,
-                            "fontSize":        10,
-                            "foregroundColor": _HEADER_FG_COLOUR,
-                        },
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment":   "MIDDLE",
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)",
-            }
-        },
-        # ── Freeze header row ─────────────────────────────────────────────────
-        {
-            "updateSheetProperties": {
-                "properties": {
-                    "sheetId": ws_id,
-                    "gridProperties": {"frozenRowCount": 1},
-                },
-                "fields": "gridProperties.frozenRowCount",
-            }
-        },
-        # ── Auto-resize all data columns ──────────────────────────────────────
-        {
-            "autoResizeDimensions": {
-                "dimensions": {
-                    "sheetId":    ws_id,
-                    "dimension":  "COLUMNS",
-                    "startIndex": 0,
-                    "endIndex":   n_cols,
-                }
-            }
-        },
-        # ── Set a reasonable row height for the header ────────────────────────
-        {
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId":    ws_id,
-                    "dimension":  "ROWS",
-                    "startIndex": 0,
-                    "endIndex":   1,
-                },
-                "properties": {"pixelSize": 36},
-                "fields": "pixelSize",
-            }
-        },
-    ]
+def _green_fill()    -> PatternFill:
+    return PatternFill(fill_type="solid", fgColor=_GREEN_BG)
 
-    worksheet.spreadsheet.batch_update({"requests": requests})
+def _border() -> Border:
+    thin = Side(style="thin", color="D0D5DD")
+    return Border(bottom=thin)
 
+def _url_font() -> Font:
+    return Font(name="Calibri", color=_LINK_BLUE, underline="single", size=9)
 
-def _set_outreach_status_dropdown(worksheet: gspread.Worksheet) -> None:
-    """
-    Add a dropdown validation to the 'Outreach Status' column (col 14)
-    so the user can update lead status directly in the sheet.
-    """
-    ws_id = worksheet.id
-    status_options = [
-        "Not Contacted",
-        "Email Sent",
-        "Followed Up",
-        "Replied",
-        "Call Booked",
-        "Converted",
-        "Not Interested",
-        "Bounced",
-    ]
-    condition_values = [{"userEnteredValue": s} for s in status_options]
-
-    requests = [
-        {
-            "setDataValidation": {
-                "range": {
-                    "sheetId":          ws_id,
-                    "startRowIndex":    1,      # skip header
-                    "endRowIndex":      2000,   # cover up to 1999 data rows
-                    "startColumnIndex": 13,     # col N (0-indexed) = col 14 (1-indexed)
-                    "endColumnIndex":   14,
-                },
-                "rule": {
-                    "condition": {
-                        "type":   "ONE_OF_LIST",
-                        "values": condition_values,
-                    },
-                    "showCustomUi":   True,
-                    "strict":         False,
-                },
-            }
-        }
-    ]
-    worksheet.spreadsheet.batch_update({"requests": requests})
+def _data_align(wrap: bool = False) -> Alignment:
+    return Alignment(vertical="center", wrap_text=wrap)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LEAD → ROW CONVERTER
+# LEAD → ROW
 # ─────────────────────────────────────────────────────────────────────────────
 def _lead_to_row(lead: Dict[str, Any]) -> List[Any]:
-    """
-    Convert a lead dict into an ordered list matching SHEET_HEADERS column order.
-    Missing keys default to empty string / "Not Contacted".
-    """
+    """Convert a lead dict to an ordered list matching SHEET_HEADERS."""
     row: List[Any] = [""] * len(SHEET_HEADERS)
-
-    for field, col_idx in _FIELD_TO_COL.items():
+    for field, col in _FIELD_TO_COL.items():
         value = lead.get(field, "")
-        # Format large integers with comma separators for readability
-        if isinstance(value, int) and value > 999:
-            value = f"{value:,}"
-        row[col_idx - 1] = value if value is not None else ""
-
-    # Notes column (index 14, 1-based col 15) stays blank — filled by the user
-    # Date Added is already in scraped_at; no extra action needed
-
+        row[col - 1] = value if value is not None else ""
     return row
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN EXPORT FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+def export_to_excel(
+    leads: List[Dict[str, Any]],
+    output_path: str = "leads_export.xlsx",
+) -> str:
+    """
+    Write all leads to a formatted Excel workbook.
+
+    Features:
+        • Dark navy bold header row with white text, frozen pane
+        • Alternating row shading; green highlight for rows with an email
+        • Hyperlink formatting on URL, Instagram, TikTok, Twitter, LinkedIn cols
+        • Outreach Status dropdown (data validation, no macros)
+        • Auto-set column widths
+        • Summary sheet with run statistics
+
+    Returns the absolute path to the saved file.
+    """
+    if not leads:
+        raise ValueError("No leads to export.")
+
+    wb = openpyxl.Workbook()
+
+    # ── Main leads sheet ──────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Leads"
+
+    # Write + format header row
+    for col_idx, header in enumerate(SHEET_HEADERS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font      = _header_font()
+        cell.fill      = _header_fill()
+        cell.alignment = _header_align()
+        cell.border    = _border()
+
+    # Freeze the header row so it stays visible while scrolling
+    ws.freeze_panes = "A2"
+
+    # Set row height for the header
+    ws.row_dimensions[1].height = 28
+
+    # URL column indices (1-based) — these get hyperlink + blue underline
+    _url_cols = {2, 7, 8, 9, 10}
+
+    # Write data rows
+    for row_num, lead in enumerate(leads, start=2):
+        row_data = _lead_to_row(lead)
+        has_email = bool(lead.get("email", "").strip())
+
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_num, column=col_idx, value=value)
+            cell.alignment = _data_align(wrap=(col_idx == 12))  # wrap description
+            cell.font      = Font(name="Calibri", size=9)
+
+            # Alternating row fill; green if email present
+            if has_email:
+                cell.fill = _green_fill()
+            elif row_num % 2 == 0:
+                cell.fill = _alt_fill()
+
+            # Hyperlink styling on URL columns
+            if col_idx in _url_cols and isinstance(value, str) and value.startswith("http"):
+                cell.font      = _url_font()
+                cell.hyperlink = value
+
+        # Set a comfortable row height
+        ws.row_dimensions[row_num].height = 18
+
+    # Apply column widths
+    for col_idx, width in _COL_WIDTHS.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Outreach Status dropdown (column N = col 14)
+    status_formula = f'"{",".join(_STATUS_OPTIONS)}"'
+    dv = DataValidation(
+        type="list",
+        formula1=status_formula,
+        allow_blank=True,
+        showDropDown=False,   # False = show the arrow button in Excel
+        showErrorMessage=True,
+        errorTitle="Invalid Status",
+        error="Please choose a value from the dropdown list.",
+    )
+    ws.add_data_validation(dv)
+    dv.sqref = f"N2:N{len(leads) + 1}"
+
+    # ── Summary sheet ─────────────────────────────────────────────────────────
+    ws_sum = wb.create_sheet(title="Summary")
+
+    total     = len(leads)
+    with_email = sum(1 for l in leads if l.get("email", "").strip())
+    with_ig    = sum(1 for l in leads if l.get("instagram", "").strip())
+    with_tt    = sum(1 for l in leads if l.get("tiktok", "").strip())
+    with_tw    = sum(1 for l in leads if l.get("twitter", "").strip())
+    keywords   = sorted({l.get("keyword_found_by", "") for l in leads if l.get("keyword_found_by")})
+    avg_subs   = (
+        int(sum(l.get("subscribers", 0) for l in leads) / total) if total else 0
+    )
+
+    summary_rows = [
+        ("Metric",                   "Value"),
+        ("Export Date",              datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Total Leads",              total),
+        ("Leads with Email",         f"{with_email} ({round(with_email/total*100 if total else 0, 1)}%)"),
+        ("Leads with Instagram",     with_ig),
+        ("Leads with TikTok",        with_tt),
+        ("Leads with Twitter / X",   with_tw),
+        ("Average Subscribers",      f"{avg_subs:,}"),
+        ("Keywords Searched",        ", ".join(keywords)),
+    ]
+
+    for r_idx, (label, value) in enumerate(summary_rows, start=1):
+        lc = ws_sum.cell(row=r_idx, column=1, value=label)
+        vc = ws_sum.cell(row=r_idx, column=2, value=value)
+        if r_idx == 1:
+            lc.font = Font(bold=True, color=_HEADER_FG, name="Calibri", size=10)
+            vc.font = Font(bold=True, color=_HEADER_FG, name="Calibri", size=10)
+            lc.fill = _header_fill()
+            vc.fill = _header_fill()
+        else:
+            lc.font = Font(bold=True, name="Calibri", size=10)
+            vc.font = Font(name="Calibri", size=10)
+        lc.alignment = _data_align()
+        vc.alignment = _data_align()
+
+    ws_sum.column_dimensions["A"].width = 26
+    ws_sum.column_dimensions["B"].width = 40
+
+    # Save
+    wb.save(output_path)
+    return str(Path(output_path).resolve())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GOOGLE SHEETS STUB  (kept so old imports don't break)
+# Replace this with the real implementation once you have a Google Cloud account.
 # ─────────────────────────────────────────────────────────────────────────────
 def export_to_google_sheets(
     leads: List[Dict[str, Any]],
@@ -238,84 +294,11 @@ def export_to_google_sheets(
     credentials_path: str,
 ) -> str:
     """
-    Export the full leads list to a Google Sheet.
-
-    Behaviour:
-        • If a sheet named `sheet_name` already exists in the service account's
-          Drive, it is OPENED and new leads are APPENDED below existing rows.
-        • If it does not exist, a new spreadsheet is CREATED, headers are written
-          and formatted, and all leads are inserted.
-        • In both cases, the function returns the URL of the sheet so the caller
-          can surface it as a clickable link in the UI.
-
-    Raises any exception to the caller so the UI can display it in an st.error().
+    Placeholder — Google Sheets export requires a service account credentials.json.
+    Falls back to Excel export and raises a clear message to the UI.
     """
-    if not leads:
-        raise ValueError("No leads to export. Scrape some channels first.")
-
-    client = _get_client(credentials_path)
-
-    # ── Open or create the spreadsheet ───────────────────────────────────────
-    try:
-        spreadsheet = client.open(sheet_name)
-        worksheet   = spreadsheet.sheet1
-        is_new      = False
-    except gspread.exceptions.SpreadsheetNotFound:
-        spreadsheet = client.create(sheet_name)
-        # Share with anyone with the link so the user can open it in a browser
-        spreadsheet.share(None, perm_type="anyone", role="writer")
-        worksheet   = spreadsheet.sheet1
-        worksheet.update_title("Leads")
-        is_new = True
-
-    # ── Write headers (new sheet only) ───────────────────────────────────────
-    if is_new:
-        worksheet.update("A1", [SHEET_HEADERS])
-        _format_header_row(worksheet)
-        try:
-            _set_outreach_status_dropdown(worksheet)
-        except Exception:
-            pass  # Dropdown validation is cosmetic — never fail the export over it
-        time.sleep(0.5)  # Let the API settle before the data write
-
-    # ── Determine the next empty row ─────────────────────────────────────────
-    existing_values = worksheet.get_all_values()
-    next_row        = len(existing_values) + 1  # 1-based, accounting for header
-
-    # ── Convert leads to row arrays ───────────────────────────────────────────
-    rows = [_lead_to_row(lead) for lead in leads]
-
-    # ── Batch-write all rows in a single API call ─────────────────────────────
-    # gspread uses A1 notation; we target from the next empty row downward.
-    start_cell = f"A{next_row}"
-    worksheet.update(start_cell, rows, value_input_option="USER_ENTERED")
-
-    # ── Bold the Channel URL cells so they're easy to click in Sheets ─────────
-    try:
-        url_col   = 2  # column B
-        ws_id     = worksheet.id
-        n_rows    = len(rows)
-        requests  = [
-            {
-                "repeatCell": {
-                    "range": {
-                        "sheetId":          ws_id,
-                        "startRowIndex":    next_row - 1,
-                        "endRowIndex":      next_row - 1 + n_rows,
-                        "startColumnIndex": url_col - 1,
-                        "endColumnIndex":   url_col,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"foregroundColor": {"red": 0.26, "green": 0.52, "blue": 0.96}}
-                        }
-                    },
-                    "fields": "userEnteredFormat.textFormat.foregroundColor",
-                }
-            }
-        ]
-        spreadsheet.batch_update({"requests": requests})
-    except Exception:
-        pass  # Cosmetic formatting — never fail the export over it
-
-    return spreadsheet.url
+    raise NotImplementedError(
+        "Google Sheets export requires a Google Cloud service account. "
+        "Use 'Export to Excel' instead — it produces the same formatted output "
+        "and can be uploaded to Google Sheets manually for free."
+    )
