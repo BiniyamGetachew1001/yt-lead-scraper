@@ -1,0 +1,22 @@
+# YouTube Lead Generator — pinned dependencies
+# Python 3.9+ required
+
+# ── Browser automation ────────────────────────────────────────────────────────
+playwright==1.44.0
+
+# ── Data handling ─────────────────────────────────────────────────────────────
+pandas==2.2.2
+
+# ── HTML parsing ──────────────────────────────────────────────────────────────
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# ── Web UI ────────────────────────────────────────────────────────────────────
+streamlit==1.35.0
+
+# ── Google Sheets export ──────────────────────────────────────────────────────
+gspread==6.1.2
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+
+# ── asyncio is stdlib (Python 3.4+) — no install needed ──────────────────────

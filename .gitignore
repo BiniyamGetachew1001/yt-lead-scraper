@@ -1,0 +1,40 @@
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+.venv-1/
+venv/
+env/
+
+# ── Secrets — NEVER commit these ─────────────────────────────────────────────
+credentials.json
+*.json
+!package.json
+# Re-allow the Streamlit secrets example template
+!.streamlit/secrets.toml.example
+
+# ── Streamlit secrets (actual values stay local) ──────────────────────────────
+.streamlit/secrets.toml
+
+# ── Scraper output files ──────────────────────────────────────────────────────
+leads_export.csv
+scraper.log
+*.log
+*.csv
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE folders ───────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
