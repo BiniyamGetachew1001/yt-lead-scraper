@@ -35,7 +35,29 @@ from SHEETS_EXPORT import export_to_excel
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def _bootstrap_playwright() -> str:
-    """Download Playwright Chromium browser. Runs once; cached forever."""
+    """
+    Ensure a usable Chromium binary exists.
+
+    Cloud (Streamlit Community Cloud / Linux):
+        Chromium is installed as a system package via packages.txt.
+        We detect it and skip the Playwright download entirely — avoids the
+        glibc / Debian Trixie package-conflict that breaks the apt install.
+
+    Local (Windows / macOS):
+        No system Chromium — run `playwright install chromium` to pull the
+        bundled binary into ~/.cache/ms-playwright/.
+    """
+    _system_paths = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/usr/lib/chromium/chromium",
+    ]
+    for p in _system_paths:
+        if Path(p).exists():
+            return f"system:{p}"
+
+    # Local fallback — download Playwright's bundled Chromium
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -43,9 +65,7 @@ def _bootstrap_playwright() -> str:
             text=True,
             timeout=300,
         )
-        if result.returncode == 0:
-            return "ok"
-        return f"warn:{result.stderr[:200]}"
+        return "playwright-bundled" if result.returncode == 0 else f"warn:{result.stderr[:200]}"
     except Exception as exc:
         return f"error:{exc}"
 

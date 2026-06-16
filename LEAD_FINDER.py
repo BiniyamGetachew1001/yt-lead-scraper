@@ -11,9 +11,11 @@ import asyncio
 import queue
 import random
 import re
+import shutil
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -291,23 +293,61 @@ async def backoff(attempt: int, cfg: LeadFinderConfig, log: QueueLogger) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # BROWSER FACTORY
 # ─────────────────────────────────────────────────────────────────────────────
+def _system_chromium_path() -> Optional[str]:
+    """
+    Return the path to a system-installed Chromium binary, or None.
+
+    On Streamlit Community Cloud (Debian Trixie) the system Chromium is
+    installed via packages.txt.  We use it instead of Playwright's bundled
+    binary to avoid glibc/package-version conflicts on that image.
+
+    Locally (Windows / macOS) this returns None and Playwright falls back to
+    its own downloaded binary as normal.
+    """
+    candidates = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/usr/lib/chromium-browser/chromium-browser",
+        "/usr/lib/chromium/chromium",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    # Also search PATH (covers unusual install locations)
+    found = shutil.which("chromium") or shutil.which("chromium-browser")
+    return found
+
+
 async def create_context(pw: Any) -> Tuple[Browser, BrowserContext]:
-    """Launch Chromium with a randomised anti-bot fingerprint."""
+    """
+    Launch Chromium with a randomised anti-bot fingerprint.
+
+    On cloud (Streamlit Community Cloud / Linux with system Chromium):
+        Uses the system /usr/bin/chromium binary installed via packages.txt.
+    Locally (Windows / macOS):
+        Uses Playwright's own downloaded Chromium binary (default behaviour).
+    """
     ua = random.choice(USER_AGENTS)
     vp = random.choice(VIEWPORTS)
 
-    browser: Browser = await pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--disable-dev-shm-usage",
-            "--disable-extensions",
-            "--disable-gpu",
-            f"--window-size={vp['width']},{vp['height']}",
-        ],
-    )
+    launch_args = [
+        "--no-sandbox",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--disable-gpu",
+        f"--window-size={vp['width']},{vp['height']}",
+    ]
+
+    chromium_path = _system_chromium_path()
+
+    launch_kwargs: Dict[str, Any] = {"headless": True, "args": launch_args}
+    if chromium_path:
+        launch_kwargs["executable_path"] = chromium_path
+
+    browser: Browser = await pw.chromium.launch(**launch_kwargs)
 
     context: BrowserContext = await browser.new_context(
         user_agent=ua,
